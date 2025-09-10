@@ -17,7 +17,7 @@ from trader.backtest.metrics import metrics
 from trader.datasources.yfinance_source import fetch
 import warnings
 warnings.simplefilter("ignore")
-
+os.makedirs("data/raw", exist_ok=True)
 
 st.set_page_config(page_title="Signals & Backtest", layout="wide")
 st.title("Backtesting Trading Strategies")
