@@ -197,7 +197,7 @@ def rank_combos(df: pd.DataFrame, sig_all: dict, fee_bps: int):
                 eq_c, net_c, pos_c, trades_c, _, _, _ = backtest_long_only(df, e, x, fee_bps=fee_bps, slip_bps=0)
                 m_c = metrics(eq_c, net_c)
                 label = mname if mname != "VOTE" else f"VOTE {kval}"
-                rows.append({"Combo": " & ".join(combo), "Mode": label, "Trades": int(trades_c), "TotalReturn": m_c["TotalReturn"]})
+                rows.append({"Combo": " & ".join(combo), "Mode": label, "Trades": int(trades_c), "TotalReturn": float(m_c["TotalReturn"])})
     res = pd.DataFrame(rows).sort_values("TotalReturn", ascending=False).reset_index(drop=True)
     res["TotalReturn(%)"] = (res["TotalReturn"] * 100).round(2)
     return res[["Combo", "Mode", "Trades", "TotalReturn", "TotalReturn(%)"]]
@@ -537,7 +537,7 @@ with right:
     st.subheader("Model Performance")
     rank_df = rank_combos(df_sig, sig_all, fee_bps=fee_bps)
     rank_show = rank_df[["Combo", "Mode", "Trades", "TotalReturn(%)"]]
-    styled_rank = rank_show.style.set_table_styles([
+    styled_rank = rank_show.style.format({"TotalReturn(%)": "{:.2f}"}).set_table_styles([
         {"selector": "th", "props": [("text-align", "center")]},
         {"selector": "td", "props": [("text-align", "center")]}
     ]).set_properties(**{"text-align": "center"})
