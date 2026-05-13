@@ -1,4 +1,10 @@
+from pathlib import Path
 import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 from trader.io.store import load_raw
 from trader.signals.rsi import compute_rsi_signals
@@ -34,9 +40,12 @@ def main(symbol: str = SYMBOL, mode: str = "VOTE", k: int | None = 2, fee_bps: i
     signals = {"ott": (ob, os), "tma": (tb, ts), "cci": (cb, cs), "rsi": (rb, rs)}
     entry, exit_ = combine(signals, mode=mode, k=k)
 
-    eq, net, pos = backtest_long_only(df, entry, exit_, fee_bps=fee_bps, slip_bps=slip_bps)
+    eq, net, pos, trades, buys, sells, open_trades = backtest_long_only(
+        df, entry, exit_, fee_bps=fee_bps, slip_bps=slip_bps
+    )
     m = metrics(eq, net)
     print(pd.Series(m).round(4))
+    print(f"trades={trades}, buys={buys}, sells={sells}, open_trades={open_trades}")
     print(eq.tail(5))
 
 if __name__ == "__main__":

@@ -1,0 +1,31 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test/type/lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter and OS/editor noise
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+
+# Streamlit local config
+.streamlit/secrets.toml
+
+# Generated data and logs
+data/processed/
+*.log

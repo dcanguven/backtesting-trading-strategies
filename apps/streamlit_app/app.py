@@ -3,7 +3,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import pandas as pd
 import streamlit as st
 import altair as alt
-from datetime import date
+from datetime import date, timedelta
 from itertools import combinations
 
 from trader.io.store import load_raw
@@ -16,29 +16,68 @@ from trader.backtest.engine import backtest_long_only
 from trader.backtest.metrics import metrics
 from trader.datasources.yfinance_source import fetch
 import warnings
+
 warnings.simplefilter("ignore")
 os.makedirs("data/raw", exist_ok=True)
 
 st.set_page_config(page_title="Signals & Backtest", layout="wide")
-st.title("Backtesting Trading Strategies")
 
 st.markdown("""
 <style>
+.app-title {
+    font-size: 2.55rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    line-height: 1.15;
+    margin-top: 0.25rem;
+    margin-bottom: 1.2rem;
+    color: #1f2937;
+}
+.app-title span {
+    opacity: 0.72;
+    font-weight: 500;
+}
 [data-testid="stMetricValue"] {
-    font-size: 1.35rem !important;  /* 1.3–1.4 iyi bir orta yol */
+    font-size: 1.35rem !important;
     line-height: 1.3 !important;
 }
 [data-testid="stMetricLabel"] {
-    font-size: 0.9rem !important;   /* 0.9–1.0 okunaklı kalır */
+    font-size: 0.9rem !important;
     line-height: 1.2 !important;
 }
+.header-label {
+    font-size: 0.82rem;
+    color: #9aa0a6;
+    margin-bottom: 0.25rem;
+}
+.last-close-card {
+    margin: 0.5rem 0 1rem 0;
+    padding: 0.7rem 1rem;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    flex-wrap: wrap;
+}
+.last-close-symbol {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: #1f2937;
+}
+.last-close-label {
+    opacity: 0.72;
+}
+.last-close-value {
+    font-weight: 700;
+}
+.last-close-separator {
+    opacity: 0.35;
+}
 </style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-.header-label { font-size: 0.82rem; color: #9aa0a6; margin-bottom: 0.25rem; }
-</style>
+<div class="app-title">Backtesting <span>Trading Strategies</span></div>
 """, unsafe_allow_html=True)
 
 RAW_PATH = "data/raw/prices.parquet"
@@ -48,14 +87,14 @@ def symbol_meta(symbol: str):
     mapping = {
         ".IS": ("Borsa Istanbul (Turkey)", "TRY"),
         ".TO": ("Toronto (Canada)", "CAD"),
-        ".V":  ("TSX Venture (Canada)", "CAD"),
-        ".L":  ("London (UK)", "GBP"),
+        ".V": ("TSX Venture (Canada)", "CAD"),
+        ".L": ("London (UK)", "GBP"),
         ".DE": ("Xetra (Germany)", "EUR"),
         ".PA": ("Euronext Paris (France)", "EUR"),
         ".MI": ("Borsa Italiana (Italy)", "EUR"),
         ".AS": ("Euronext Amsterdam (Netherlands)", "EUR"),
         ".HK": ("Hong Kong", "HKD"),
-        ".T":  ("Tokyo (Japan)", "JPY"),
+        ".T": ("Tokyo (Japan)", "JPY"),
         ".KS": ("Korea Exchange", "KRW"),
         ".KQ": ("KOSDAQ (Korea)", "KRW"),
         ".AX": ("ASX (Australia)", "AUD"),
@@ -78,6 +117,36 @@ def symbol_meta(symbol: str):
             return meta
     return ("US (NYSE/Nasdaq)", "USD")
 
+def parse_capital(value):
+    text = str(value).strip()
+    text = text.replace(" ", "")
+    if text == "":
+        return 0.0
+    if "," in text and "." in text:
+        cleaned = text.replace(",", "")
+    elif "," in text and "." not in text:
+        parts = text.split(",")
+        if len(parts[-1]) == 2 and all(p.isdigit() for p in parts):
+            cleaned = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            cleaned = "".join(parts)
+    else:
+        cleaned = text
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 10000.0
+
+def format_capital(value):
+    try:
+        return f"{float(value):,.2f}"
+    except ValueError:
+        return "10,000.00"
+
+def normalize_initial_capital():
+    value = parse_capital(st.session_state.get("init_capital_text", "10000"))
+    st.session_state["init_capital_text"] = format_capital(value)
+
 def load_data():
     df = load_raw().copy()
     if not pd.api.types.is_datetime64_any_dtype(df["date"]):
@@ -95,10 +164,15 @@ def fetch_and_append(yf_symbol: str, start_date: str):
     df_all.to_parquet(RAW_PATH)
     return True
 
-def build_signals(df: pd.DataFrame, rsi_n=14, rsi_ob=70, rsi_os=30,
-                  cci_n=20, cci_up=100, cci_lo=-100,
-                  ott_len=2, ott_pct=1.4,
-                  tma_f=5, tma_m=20, tma_s=50):
+def refresh_symbol_data(symbol: str, df_all: pd.DataFrame):
+    df_symbol = df_all[df_all["symbol"] == symbol].copy()
+    if df_symbol.empty:
+        return False
+    latest_date = pd.to_datetime(df_symbol["date"]).max().date()
+    fetch_start = str(latest_date)
+    return fetch_and_append(symbol, fetch_start)
+
+def build_signals(df: pd.DataFrame, rsi_n=14, rsi_ob=70, rsi_os=30, cci_n=20, cci_up=100, cci_lo=-100, ott_len=2, ott_pct=1.4, tma_f=5, tma_m=20, tma_s=50):
     r, rb, rs = compute_rsi_signals(df["close"], n=rsi_n, ob=rsi_ob, os=rsi_os)
     c, cb, cs = compute_cci_signals(df, n=cci_n, upper=cci_up, lower=cci_lo)
     df2 = compute_ott(df.copy(), length=ott_len, percent=ott_pct, ma_type="EMA")
@@ -123,15 +197,74 @@ def rank_combos(df: pd.DataFrame, sig_all: dict, fee_bps: int):
                 eq_c, net_c, pos_c, trades_c, _, _, _ = backtest_long_only(df, e, x, fee_bps=fee_bps, slip_bps=0)
                 m_c = metrics(eq_c, net_c)
                 label = mname if mname != "VOTE" else f"VOTE {kval}"
-                rows.append({
-                    "Combo": " & ".join(combo),
-                    "Mode": label,
-                    "Trades": int(trades_c),
-                    "TotalReturn": m_c["TotalReturn"]
-                })
+                rows.append({"Combo": " & ".join(combo), "Mode": label, "Trades": int(trades_c), "TotalReturn": m_c["TotalReturn"]})
     res = pd.DataFrame(rows).sort_values("TotalReturn", ascending=False).reset_index(drop=True)
     res["TotalReturn(%)"] = (res["TotalReturn"] * 100).round(2)
     return res[["Combo", "Mode", "Trades", "TotalReturn", "TotalReturn(%)"]]
+
+def make_crosshair_chart(base_df, x_col, y_col, y_title, main_label, buys_df, sells_df, buy_y_col, sell_y_col, highlight_df=None):
+    nearest = alt.selection_point(nearest=True, on="pointerover", fields=[x_col], empty=False)
+
+    base = alt.Chart(base_df).mark_line().encode(
+        x=alt.X(f"{x_col}:T", title="", axis=alt.Axis(labelAngle=-45, format="%d/%m/%y")),
+        y=alt.Y(f"{y_col}:Q", title=y_title),
+        tooltip=[
+            alt.Tooltip(f"{x_col}:T", title="Date", format="%d/%m/%y"),
+            alt.Tooltip(f"{y_col}:Q", title=main_label, format=",.2f")
+        ]
+    )
+
+    selectors = alt.Chart(base_df).mark_point(opacity=0).encode(
+        x=f"{x_col}:T",
+        y=f"{y_col}:Q"
+    ).add_params(nearest)
+
+    points = base.mark_point(size=70).encode(
+        opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+    )
+
+    vertical_rule = alt.Chart(base_df).mark_rule(color="#9ca3af", strokeDash=[4, 4]).encode(
+        x=f"{x_col}:T"
+    ).transform_filter(nearest)
+
+    horizontal_rule = alt.Chart(base_df).mark_rule(color="#9ca3af", strokeDash=[4, 4]).encode(
+        y=f"{y_col}:Q"
+    ).transform_filter(nearest)
+
+    text = alt.Chart(base_df).mark_text(align="left", dx=8, dy=-8, fontSize=12).encode(
+        x=f"{x_col}:T",
+        y=f"{y_col}:Q",
+        text=alt.Text(f"{y_col}:Q", format=",.2f")
+    ).transform_filter(nearest)
+
+    buys = alt.Chart(buys_df).mark_point(size=60, filled=True, color="#00c853").encode(
+        x=alt.X("date:T", axis=alt.Axis(labelAngle=-45, format="%d/%m/%y")),
+        y=f"{buy_y_col}:Q",
+        tooltip=[
+            alt.Tooltip("date:T", title="Buy Date", format="%d/%m/%y"),
+            alt.Tooltip(f"{buy_y_col}:Q", title="Buy Price", format=",.2f")
+        ]
+    )
+
+    sells = alt.Chart(sells_df).mark_point(size=60, filled=True, color="#ff1744").encode(
+        x=alt.X("date:T", axis=alt.Axis(labelAngle=-45, format="%d/%m/%y")),
+        y=f"{sell_y_col}:Q",
+        tooltip=[
+            alt.Tooltip("date:T", title="Sell Date", format="%d/%m/%y"),
+            alt.Tooltip(f"{sell_y_col}:Q", title="Sell Price", format=",.2f")
+        ]
+    )
+
+    chart = base + selectors + points + vertical_rule + horizontal_rule + text + buys + sells
+
+    if highlight_df is not None and not highlight_df.empty:
+        highlight = alt.Chart(highlight_df).mark_rect(color="#00c853", opacity=0.5).encode(
+            x=alt.X("start:T", axis=alt.Axis(labelAngle=-45, format="%d/%m/%y")),
+            x2="end:T"
+        )
+        chart = highlight + chart
+
+    return chart.interactive()
 
 if "search_results" not in st.session_state:
     st.session_state["search_results"] = []
@@ -145,6 +278,10 @@ if "mode_sel" not in st.session_state:
     st.session_state["mode_sel"] = "NONE"
 if "vote_k" not in st.session_state:
     st.session_state["vote_k"] = 2
+if "init_capital_text" not in st.session_state:
+    st.session_state["init_capital_text"] = "10,000.00"
+if "refreshed_symbols" not in st.session_state:
+    st.session_state["refreshed_symbols"] = []
 
 df_all = load_data()
 symbols = sorted(df_all["symbol"].unique().tolist())
@@ -159,7 +296,8 @@ with row[0]:
 
 with row[1]:
     st.markdown("<div class='header-label'>Initial Capital</div>", unsafe_allow_html=True)
-    init_cap = float(st.number_input("Initial Capital", min_value=0.0, value=10000.0, step=100.0, label_visibility="collapsed"))
+    st.text_input("Initial Capital", key="init_capital_text", label_visibility="collapsed", on_change=normalize_initial_capital)
+    init_cap = parse_capital(st.session_state["init_capital_text"])
 
 with row[2]:
     st.markdown("<div class='header-label'>Start Date</div>", unsafe_allow_html=True)
@@ -207,38 +345,44 @@ if len(st.session_state["search_results"]) > 1 and st.session_state["selected_sy
 
 symbol = st.session_state["selected_symbol"] or st.session_state["search_results"][0]
 
-df = df_all[df_all["symbol"] == symbol].copy().reset_index(drop=True)
-df = df[df["date"] >= pd.to_datetime(start_dt)].reset_index(drop=True)
+if symbol not in st.session_state["refreshed_symbols"]:
+    refreshed = refresh_symbol_data(symbol, df_all)
+    st.session_state["refreshed_symbols"].append(symbol)
+    if refreshed:
+        df_all = load_data()
+        symbols = sorted(df_all["symbol"].unique().tolist())
 
-if not df.empty:
-    last_row = df.iloc[-1]
-    last_close = float(last_row["close"])
-    last_dt = pd.to_datetime(last_row["date"]).date()
-    exch, curr = symbol_meta(symbol)
-    st.markdown(
-        f"""
-        <div style="
-            margin: 0.5rem 0 1rem 0;
-            padding: 0.6rem 0.9rem;
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 10px;
-            display:flex; align-items:center; gap:0.8rem; flex-wrap:wrap;
-        ">
-            <span style="font-weight:600; font-size:1.05rem;">{symbol}</span>
-            <span style="opacity:0.75;">Last close:</span>
-            <span style="font-weight:700;">{last_close:,.2f}</span>
-            <span style="opacity:0.6;">(as of {last_dt})</span>
-            <span style="opacity:0.35;">•</span>
-            <span style="opacity:0.75;">Exchange:</span>
-            <span style="font-weight:600;">{exch}</span>
-            <span style="opacity:0.35;">•</span>
-            <span style="opacity:0.75;">Currency:</span>
-            <span style="font-weight:600;">{curr}</span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+df_symbol_full = df_all[df_all["symbol"] == symbol].copy().reset_index(drop=True)
+df_symbol_full = df_symbol_full.sort_values("date").reset_index(drop=True)
+
+df = df_symbol_full[df_symbol_full["date"] >= pd.to_datetime(start_dt)].reset_index(drop=True)
+
+if df.empty:
+    st.warning("No data available for the selected date range.")
+    st.stop()
+
+last_row = df_symbol_full.iloc[-1]
+last_close = float(last_row["close"])
+last_dt = pd.to_datetime(last_row["date"]).date()
+exch, curr = symbol_meta(symbol)
+
+st.markdown(
+    f"""
+    <div class="last-close-card">
+        <span class="last-close-symbol">{symbol}</span>
+        <span class="last-close-separator">|</span>
+        <span class="last-close-label">Last close:</span>
+        <span class="last-close-value">{last_close:,.2f} {curr}</span>
+        <span class="last-close-separator">|</span>
+        <span class="last-close-label">As of:</span>
+        <span class="last-close-value">{last_dt}</span>
+        <span class="last-close-separator">|</span>
+        <span class="last-close-label">Exchange:</span>
+        <span class="last-close-value">{exch}</span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 df_sig_init, sig_all_init = build_signals(df)
 
@@ -256,13 +400,7 @@ if st.session_state["pending_best"]:
         st.rerun()
 
 with mode_placeholder:
-    mode = st.selectbox(
-        "Combine Mode",
-        ["NONE", "ANY", "ALL", "VOTE"],
-        index=["NONE","ANY","ALL","VOTE"].index(st.session_state["mode_sel"]),
-        key="mode_sel",
-        label_visibility="collapsed"
-    )
+    mode = st.selectbox("Combine Mode", ["NONE", "ANY", "ALL", "VOTE"], index=["NONE", "ANY", "ALL", "VOTE"].index(st.session_state["mode_sel"]), key="mode_sel", label_visibility="collapsed")
 
 side = st.sidebar.container()
 models = side.multiselect("Models", ["OTT", "TMA", "CCI", "RSI"], default=st.session_state["models_sel"], key="models_sel")
@@ -306,18 +444,21 @@ intervals = []
 buy_dates = df_sig.loc[buy_mask, "date"].tolist()
 sell_dates = df_sig.loc[sell_mask, "date"].tolist()
 si = 0
+
 for bd in buy_dates:
     while si < len(sell_dates) and sell_dates[si] < bd:
         si += 1
     if si < len(sell_dates):
         intervals.append({"start": bd, "end": sell_dates[si]})
         si += 1
+
 highlight_df = pd.DataFrame(intervals)
 
 eq_buys_df = pd.DataFrame({"date": df_sig.loc[buy_mask, "date"], "equity": eq.loc[buy_mask].values})
 eq_sells_df = pd.DataFrame({"date": df_sig.loc[sell_mask, "date"], "equity": eq.loc[sell_mask].values})
 
 bh_ret = 0.0
+
 if not df_sig.empty:
     first_close = float(df_sig["close"].iloc[0])
     last_close_bh = float(df_sig["close"].iloc[-1])
@@ -327,10 +468,10 @@ if not df_sig.empty:
 strat_value = init_cap * (1.0 + float(m["TotalReturn"]))
 bh_value = init_cap * (1.0 + float(bh_ret))
 
-left, right = st.columns([2.3, 0.7])
+left, right = st.columns([2.5, 0.9])
 
 with left:
-    kpis = st.columns(6)  # 8 yerine 6 kolon
+    kpis = st.columns(6)
 
     kpis[0].metric("Strategy Return", f"{m['TotalReturn']*100:.2f}%")
     kpis[1].metric("Strategy Value", f"{strat_value:,.2f} {curr}")
@@ -340,43 +481,35 @@ with left:
     kpis[5].metric("Sells", f"{sells}")
 
     st.subheader(f"Price • {symbol}")
-    price_base = alt.Chart(df_sig).mark_line().encode(
-        x=alt.X("date:T", title=""),
-        y=alt.Y("close:Q", title="Price")
+    price_chart = make_crosshair_chart(
+        base_df=df_sig,
+        x_col="date",
+        y_col="close",
+        y_title="Price",
+        main_label="Price",
+        buys_df=buys_df,
+        sells_df=sells_df,
+        buy_y_col="price",
+        sell_y_col="price",
+        highlight_df=highlight_df
     )
-    price_buys = alt.Chart(buys_df).mark_point(size=60, filled=True, color="#00c853").encode(
-        x="date:T", y="price:Q"
-    )
-    price_sells = alt.Chart(sells_df).mark_point(size=60, filled=True, color="#ff1744").encode(
-        x="date:T", y="price:Q"
-    )
-    if not highlight_df.empty:
-        price_highlight = alt.Chart(highlight_df).mark_rect(color="#00c853", opacity=0.5).encode(
-            x="start:T", x2="end:T"
-        )
-        st.altair_chart(price_highlight + price_base + price_buys + price_sells, use_container_width=True)
-    else:
-        st.altair_chart(price_base + price_buys + price_sells, use_container_width=True)
+    st.altair_chart(price_chart, use_container_width=True)
 
     st.subheader(f"Equity • {symbol} • Mode: {mode} • Models: {', '.join(models) if mode != 'NONE' else 'Buy & Hold'}")
     eq_df = pd.DataFrame({"date": df_sig["date"], "equity": eq.values})
-    eq_base = alt.Chart(eq_df).mark_line().encode(
-        x=alt.X("date:T", title=""),
-        y=alt.Y("equity:Q", title="Equity")
+    eq_chart = make_crosshair_chart(
+        base_df=eq_df,
+        x_col="date",
+        y_col="equity",
+        y_title="Equity",
+        main_label="Equity",
+        buys_df=eq_buys_df,
+        sells_df=eq_sells_df,
+        buy_y_col="equity",
+        sell_y_col="equity",
+        highlight_df=highlight_df
     )
-    eq_buys = alt.Chart(eq_buys_df).mark_point(size=60, filled=True, color="#00c853").encode(
-        x="date:T", y="equity:Q"
-    )
-    eq_sells = alt.Chart(eq_sells_df).mark_point(size=60, filled=True, color="#ff1744").encode(
-        x="date:T", y="equity:Q"
-    )
-    if not highlight_df.empty:
-        eq_highlight = alt.Chart(highlight_df).mark_rect(color="#00c853", opacity=0.5).encode(
-            x="start:T", x2="end:T"
-        )
-        st.altair_chart(eq_highlight + eq_base + eq_buys + eq_sells, use_container_width=True)
-    else:
-        st.altair_chart(eq_base + eq_buys + eq_sells, use_container_width=True)
+    st.altair_chart(eq_chart, use_container_width=True)
 
 with right:
     st.markdown(
@@ -404,4 +537,8 @@ with right:
     st.subheader("Model Performance")
     rank_df = rank_combos(df_sig, sig_all, fee_bps=fee_bps)
     rank_show = rank_df[["Combo", "Mode", "Trades", "TotalReturn(%)"]]
-    st.dataframe(rank_show, use_container_width=True, height=520, hide_index=True)
+    styled_rank = rank_show.style.set_table_styles([
+        {"selector": "th", "props": [("text-align", "center")]},
+        {"selector": "td", "props": [("text-align", "center")]}
+    ]).set_properties(**{"text-align": "center"})
+    st.dataframe(styled_rank, use_container_width=True, height=520, hide_index=True)
